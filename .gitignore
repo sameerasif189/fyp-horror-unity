@@ -1,0 +1,57 @@
+# Unity generated
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+_UpgradeReport*/
+crashdumps/
+sysinfo.txt
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+*.csproj
+*.unityproj
+*.sln
+*.slnx
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Cursor / local agent
+.cursor/
+.claude/
+*.canvas.tsx
+
+# Large local ML dumps (not needed to open the Unity scene)
+/models/
+
+# Clone separately via setup_deps.ps1 → https://github.com/sameerasif189/fyp-iteration-2
+fyp iteration 2/
+
+# Secrets / local env
+.env
+.env.*
+*.pem
+credentials.json
+**/ai-editor-logs.txt
+Temp/
