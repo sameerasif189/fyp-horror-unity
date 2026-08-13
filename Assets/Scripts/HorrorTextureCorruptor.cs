@@ -1,41 +1,72 @@
 using UnityEngine;
 
 /// <summary>
-/// CPU procedural horror corruption matching iteration-2 training corruptions
-/// (grime, cracks, blood, scorch) so surfaces visibly deform by stress.
+/// Stress-driven TV-static distortion on haunted-house albedos (scanlines, snow, tear).
+/// No blood or crack overlays.
 /// </summary>
 public static class HorrorTextureCorruptor
 {
     public static Texture2D Corrupt(Texture2D source, int stressLevel, int size = 256)
     {
+        return Corrupt(source, stressLevel, size, seedOffset: 0);
+    }
+
+    public static Texture2D Corrupt(Texture2D source, int stressLevel, int size, int seedOffset)
+    {
         stressLevel = Mathf.Clamp(stressLevel, 0, 5);
         var src = ResizeReadable(source, size);
         var pixels = src.GetPixels();
-        var rng = new System.Random(1357 + stressLevel * 997);
+        var rng = new System.Random(1357 + stressLevel * 997 + seedOffset * 7919);
 
-        float intensity = stressLevel / 5f;
-        if (stressLevel >= 1) ApplyGrime(pixels, size, intensity * 0.85f, rng);
-        if (stressLevel >= 2) ApplyCracks(pixels, size, intensity, rng);
-        if (stressLevel >= 3) ApplyBlood(pixels, size, intensity, rng);
-        if (stressLevel >= 4) ApplyScorch(pixels, size, intensity, rng);
-        if (stressLevel >= 5)
-        {
-            ApplyBlood(pixels, size, intensity * 1.15f, rng);
-            ApplyCracks(pixels, size, intensity * 1.2f, rng);
-            ApplyDecayNoise(pixels, size, 0.35f, rng);
-        }
+        ApplyTvStatic(pixels, size, stressLevel, rng);
 
         var outTex = new Texture2D(size, size, TextureFormat.RGBA32, true, false)
         {
             wrapMode = TextureWrapMode.Repeat,
             filterMode = FilterMode.Bilinear,
-            name = source.name + "_Corrupted_" + stressLevel
+            name = source.name + "_Corrupted_" + stressLevel + "_" + seedOffset
         };
         outTex.SetPixels(pixels);
         outTex.Apply(true);
         if (src != source)
             Object.Destroy(src);
         return outTex;
+    }
+
+    /// <summary>
+    /// Mild wrap-shift so the next generation is not identical. No flip/rotate —
+    /// those made walls look like they warped with the yard.
+    /// </summary>
+    public static Texture2D RemapSource(Texture2D source, int size, int seed)
+    {
+        var src = ResizeReadable(source, size);
+        var px = src.GetPixels();
+        var rng = new System.Random(seed);
+        int ox = rng.Next(size / 8);
+        int oy = rng.Next(size / 8);
+
+        var outPx = new Color[size * size];
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                int sx = (x + ox) % size;
+                int sy = (y + oy) % size;
+                outPx[y * size + x] = px[sy * size + sx];
+            }
+        }
+
+        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false, false)
+        {
+            name = source.name + "_remap_" + seed,
+            wrapMode = TextureWrapMode.Repeat,
+            filterMode = FilterMode.Bilinear
+        };
+        tex.SetPixels(outPx);
+        tex.Apply(false);
+        if (src != source)
+            Object.Destroy(src);
+        return tex;
     }
 
     static Texture2D ResizeReadable(Texture2D source, int size)
@@ -52,134 +83,94 @@ public static class HorrorTextureCorruptor
         return tex;
     }
 
-    static void ApplyGrime(Color[] px, int size, float intensity, System.Random rng)
+    static void ApplyTvStatic(Color[] px, int size, int level, System.Random rng)
     {
-        int patches = 8 + (int)(40 * intensity);
-        for (int p = 0; p < patches; p++)
+        if (level <= 0) return;
+        float t = Mathf.Clamp01(level / 5f);
+
+        int scanStep = t < 0.45f ? 2 : 1;
+        float scan = 0.18f + 0.72f * t;
+        for (int y = 0; y < size; y += scanStep)
         {
-            int cx = rng.Next(size);
-            int cy = rng.Next(size);
-            int rad = 10 + rng.Next(10 + (int)(60 * intensity));
-            float darken = 0.25f + 0.55f * intensity;
-            for (int y = cy - rad; y <= cy + rad; y++)
-            for (int x = cx - rad; x <= cx + rad; x++)
+            float a = scan * (0.45f + 0.55f * Hash01(y, level, rng));
+            for (int x = 0; x < size; x++)
             {
-                if ((uint)x >= (uint)size || (uint)y >= (uint)size) continue;
-                float dx = (x - cx) / (float)rad;
-                float dy = (y - cy) / (float)rad;
-                float d = Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dy));
-                if (d >= 1f || rng.NextDouble() > 0.65) continue;
-                float a = (1f - d) * darken;
                 int i = y * size + x;
                 var c = px[i];
                 c.r *= 1f - a;
-                c.g *= 1f - a * 1.05f;
-                c.b *= 1f - a * 1.1f;
+                c.g *= 1f - a;
+                c.b *= 1f - a;
                 px[i] = c;
             }
         }
-    }
 
-    static void ApplyCracks(Color[] px, int size, float intensity, System.Random rng)
-    {
-        int cracks = 4 + (int)(18 * intensity);
-        for (int c = 0; c < cracks; c++)
+        int snow = (int)(size * size * (0.06f + 0.42f * t));
+        for (int s = 0; s < snow; s++)
         {
-            float x = rng.Next(size);
-            float y = rng.Next(size);
-            float angle = (float)(rng.NextDouble() * Mathf.PI * 2);
-            int length = 20 + rng.Next(20 + (int)(90 * intensity));
-            for (int s = 0; s < length; s++)
+            int i = rng.Next(px.Length);
+            float n = (float)rng.NextDouble();
+            float a = 0.45f + 0.55f * t;
+            var c = px[i];
+            px[i] = Color.Lerp(c, new Color(n, n, n, c.a), a);
+        }
+
+        int bars = 1 + level;
+        for (int b = 0; b < bars; b++)
+        {
+            int barY = rng.Next(size);
+            int barH = 2 + (int)(22 * t);
+            float barA = 0.22f + 0.58f * t;
+            for (int y = barY; y < barY + barH && y < size; y++)
+            for (int x = 0; x < size; x++)
             {
-                angle += (float)(rng.NextDouble() - 0.5) * 0.45f;
-                x += Mathf.Cos(angle);
-                y += Mathf.Sin(angle);
-                int w = 1 + (int)((1f - s / (float)length) * (1 + 2 * intensity));
-                for (int oy = -w; oy <= w; oy++)
-                for (int ox = -w; ox <= w; ox++)
+                int i = y * size + x;
+                var c = px[i];
+                float n = 0.55f + 0.45f * (float)rng.NextDouble();
+                px[i] = Color.Lerp(c, new Color(n, n, n), barA);
+            }
+        }
+
+        if (level >= 1)
+        {
+            var copy = (Color[])px.Clone();
+            int tears = 3 + level * 6;
+            for (int k = 0; k < tears; k++)
+            {
+                int y0 = rng.Next(size);
+                int h = 1 + rng.Next(3 + level * 2);
+                int shift = (rng.Next(2) * 2 - 1) * (4 + rng.Next(8 + level * 6));
+                for (int y = y0; y < y0 + h && y < size; y++)
                 {
-                    int ix = Mathf.RoundToInt(x) + ox;
-                    int iy = Mathf.RoundToInt(y) + oy;
-                    if ((uint)ix >= (uint)size || (uint)iy >= (uint)size) continue;
-                    int i = iy * size + ix;
-                    var col = px[i];
-                    col.r *= 0.15f;
-                    col.g *= 0.12f;
-                    col.b *= 0.1f;
-                    px[i] = col;
+                    for (int x = 0; x < size; x++)
+                    {
+                        int sx = (x + shift) % size;
+                        if (sx < 0) sx += size;
+                        px[y * size + x] = copy[y * size + sx];
+                    }
                 }
             }
         }
-    }
 
-    static void ApplyBlood(Color[] px, int size, float intensity, System.Random rng)
-    {
-        int stains = 5 + (int)(28 * intensity);
-        for (int s = 0; s < stains; s++)
+        if (level >= 2)
         {
-            int cx = rng.Next(size);
-            int cy = rng.Next(size);
-            int rad = 5 + rng.Next(8 + (int)(35 * intensity));
-            for (int y = cy - rad; y <= cy + rad; y++)
-            for (int x = cx - rad; x <= cx + rad; x++)
+            var copy = (Color[])px.Clone();
+            int split = 2 + level;
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
             {
-                if ((uint)x >= (uint)size || (uint)y >= (uint)size) continue;
-                float dx = x - cx;
-                float dy = y - cy;
-                float dist = Mathf.Sqrt(dx * dx + dy * dy) / rad;
-                if (dist >= 1f) continue;
-                float a = Mathf.Pow(1f - dist, 1.4f) * intensity * 0.95f;
                 int i = y * size + x;
-                var c = px[i];
-                float br = 0.55f + (float)rng.NextDouble() * 0.28f;
-                float bg = 0.02f;
-                float bb = 0.02f;
-                c.r = c.r * (1f - a) + br * a;
-                c.g = c.g * (1f - a) + bg * a;
-                c.b = c.b * (1f - a) + bb * a;
+                int xr = Mathf.Clamp(x + split, 0, size - 1);
+                int xb = Mathf.Clamp(x - split, 0, size - 1);
+                var c = copy[i];
+                c.r = copy[y * size + xr].r;
+                c.b = copy[y * size + xb].b;
                 px[i] = c;
             }
         }
     }
 
-    static void ApplyScorch(Color[] px, int size, float intensity, System.Random rng)
+    static float Hash01(int y, int level, System.Random rng)
     {
-        int burns = 3 + (int)(10 * intensity);
-        for (int b = 0; b < burns; b++)
-        {
-            int cx = rng.Next(size);
-            int cy = rng.Next(size);
-            int rad = 15 + rng.Next(20 + (int)(50 * intensity));
-            for (int y = cy - rad; y <= cy + rad; y++)
-            for (int x = cx - rad; x <= cx + rad; x++)
-            {
-                if ((uint)x >= (uint)size || (uint)y >= (uint)size) continue;
-                float dx = (x - cx) / (float)rad;
-                float dy = (y - cy) / (float)rad;
-                float dist = Mathf.Sqrt(dx * dx + dy * dy);
-                if (dist >= 1f) continue;
-                float a = (1f - dist) * intensity * 0.7f;
-                int i = y * size + x;
-                var c = px[i];
-                c.r = Mathf.Lerp(c.r, c.r * 0.2f + 0.15f, a);
-                c.g = Mathf.Lerp(c.g, c.g * 0.12f, a);
-                c.b = Mathf.Lerp(c.b, c.b * 0.08f, a);
-                px[i] = c;
-            }
-        }
-    }
-
-    static void ApplyDecayNoise(Color[] px, int size, float amount, System.Random rng)
-    {
-        for (int i = 0; i < px.Length; i++)
-        {
-            if (rng.NextDouble() > 0.08) continue;
-            float n = (float)rng.NextDouble();
-            var c = px[i];
-            c.r = Mathf.Clamp01(c.r * (1f - amount) + n * 0.25f * amount);
-            c.g = Mathf.Clamp01(c.g * (1f - amount * 1.2f));
-            c.b = Mathf.Clamp01(c.b * (1f - amount * 1.3f));
-            px[i] = c;
-        }
+        return (float)((y * 13 + level * 7 + rng.Next(8)) % 100) / 100f;
     }
 }

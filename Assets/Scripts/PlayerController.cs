@@ -68,6 +68,9 @@ public class PlayerController : MonoBehaviour
 
     void Update()
     {
+        if (GameStartMenu.Instance != null && !GameStartMenu.GameplayActive)
+            return;
+
         if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
             SetCursorLocked(!_cursorLocked);
 

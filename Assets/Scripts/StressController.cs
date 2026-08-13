@@ -9,7 +9,7 @@ public class StressController : MonoBehaviour
     public static StressController Instance { get; private set; }
 
     [SerializeField] int stressLevel;
-    [SerializeField] bool showHud = true;
+    [SerializeField] bool showHud = false;
 
     public int StressLevel => stressLevel;
     public event System.Action<int> OnStressChanged;
@@ -37,6 +37,9 @@ public class StressController : MonoBehaviour
 
     void Update()
     {
+        if (GameStartMenu.Instance != null && !GameStartMenu.GameplayActive)
+            return;
+
         var kb = Keyboard.current;
         if (kb == null)
             return;
@@ -49,20 +52,11 @@ public class StressController : MonoBehaviour
         else if (kb.digit5Key.wasPressedThisFrame || kb.numpad5Key.wasPressedThisFrame) SetStressLevel(5);
     }
 
-    public void SetStressLevel(int level)
-    {
-        level = Mathf.Clamp(level, 0, 5);
-        if (level == stressLevel)
-            return;
-
-        stressLevel = level;
-        OnStressChanged?.Invoke(stressLevel);
-        Debug.Log($"[Stress] level={stressLevel} ({LevelNames[stressLevel]})");
-    }
-
     void OnGUI()
     {
         if (!showHud)
+            return;
+        if (GameStartMenu.Instance != null && !GameStartMenu.GameplayActive)
             return;
 
         var style = new GUIStyle(GUI.skin.box)
@@ -72,6 +66,17 @@ public class StressController : MonoBehaviour
             padding = new RectOffset(12, 12, 8, 8)
         };
         string name = LevelNames[Mathf.Clamp(stressLevel, 0, 5)];
-        GUI.Box(new Rect(16, 16, 320, 48), $"Stress {stressLevel}/5 ? {name}\nKeys 0-5 to change", style);
+        GUI.Box(new Rect(16, 16, 320, 48), $"Stress {stressLevel}/5 — {name}\nKeys 0-5 to change", style);
+    }
+
+    public void SetStressLevel(int level)
+    {
+        level = Mathf.Clamp(level, 0, 5);
+        if (level == stressLevel)
+            return;
+
+        stressLevel = level;
+        OnStressChanged?.Invoke(stressLevel);
+        Debug.Log($"[Stress] level={stressLevel} ({LevelNames[stressLevel]})");
     }
 }
