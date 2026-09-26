@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- AdaPsych app icon. The roof is a heartbeat spike (the game adapts to the player's stress); the one window
+       is a watching eye; the red cracks are the stress-5 look. Source of truth for every PNG in this folder. -->
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="52%" r="66%">
+      <stop offset="0" stop-color="#6a0d11"/>
+      <stop offset="0.38" stop-color="#3a0609"/>
+      <stop offset="0.75" stop-color="#140304"/>
+      <stop offset="1" stop-color="#070405"/>
+    </radialGradient>
+    <radialGradient id="eye" cx="50%" cy="50%" r="55%">
+      <stop offset="0" stop-color="#ffe6c4"/>
+      <stop offset="0.2" stop-color="#ff5a2e"/>
+      <stop offset="0.62" stop-color="#c0140e"/>
+      <stop offset="1" stop-color="#4c0305"/>
+    </radialGradient>
+    <linearGradient id="fog" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a0a0d" stop-opacity="0"/>
+      <stop offset="0.75" stop-color="#4a0a0d" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#4a0a0d" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="50%" cy="50%" r="72%">
+      <stop offset="0.62" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.6"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="16"/></filter>
+    <clipPath id="tile"><rect width="1024" height="1024" rx="224"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#tile)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+
+    <!-- low fog on the horizon, then the ground -->
+    <rect x="0" y="760" width="1024" height="92" fill="url(#fog)"/>
+    <path d="M0 846 Q512 812 1024 846 V1024 H0 Z" fill="#030203"/>
+
+    <!-- house: chimney, roof (the heartbeat's R spike), walls; a dark rim keeps the walls apart from the ground -->
+    <g fill="#030203" stroke="#2c0406" stroke-width="6" stroke-linejoin="round">
+      <path d="M580 336 L622 330 L622 462 L580 382 Z"/>
+      <rect x="392" y="552" width="240" height="300"/>
+    </g>
+    <path d="M353 560 L512 250 L671 560 Z" fill="#030203"/>
+
+    <!-- cracks spreading from the eye -->
+    <g fill="none" stroke="#9a0c0c" stroke-width="5" stroke-linecap="round" stroke-linejoin="miter">
+      <path d="M428 682 L414 694 L409 718 L397 731 L394 760"/>
+      <path d="M409 718 L398 714"/>
+      <path d="M596 678 L611 668 L616 650 L630 640"/>
+      <path d="M512 736 L507 760 L517 781 L509 812 L514 850"/>
+      <path d="M517 781 L533 792"/>
+    </g>
+
+    <!-- the eye -->
+    <path d="M422 680 Q512 604 602 680 Q512 756 422 680 Z" fill="#ff2a1a" opacity="0.85" filter="url(#glow)"/>
+    <path d="M424 680 Q512 614 600 680 Q512 746 424 680 Z" fill="url(#eye)"/>
+    <ellipse cx="512" cy="680" rx="12" ry="52" fill="#120000"/>
+    <circle cx="534" cy="660" r="7" fill="#fff3e6" opacity="0.75"/>
+
+    <!-- heartbeat: flat, P wave, the roof spike, S dip, T wave, flat. Glow, tube, hot core. -->
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M60 560 H236 L262 536 L288 560 H353 L512 250 L704 624 L740 560 H780 L810 526 L842 560 H964"
+            stroke="#ff2a1a" stroke-width="48" opacity="0.6" filter="url(#glow)"/>
+      <path d="M60 560 H236 L262 536 L288 560 H353 L512 250 L704 624 L740 560 H780 L810 526 L842 560 H964"
+            stroke="#e8261c" stroke-width="30"/>
+      <path d="M60 560 H236 L262 536 L288 560 H353 L512 250 L704 624 L740 560 H780 L810 526 L842 560 H964"
+            stroke="#ff9a78" stroke-width="8" opacity="0.85"/>
+    </g>
+
+    <rect width="1024" height="1024" fill="url(#vignette)"/>
+  </g>
+</svg>

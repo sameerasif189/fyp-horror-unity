@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- AdaPsych banner / social card. Rendered to PNG with headless Edge at 1600x520 (README banner) and 1280x640
+     (GitHub social preview); the layout scales with the viewport. -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(ellipse 38vw 70vh at 17vw 50%, rgba(120, 14, 18, 0.55), rgba(0, 0, 0, 0) 70%),
+      radial-gradient(ellipse 80vw 90vh at 60% 120%, rgba(60, 6, 9, 0.5), rgba(0, 0, 0, 0) 70%),
+      linear-gradient(180deg, #0b0709 0%, #060405 100%);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex; align-items: center;
+  }
+  .wrap { display: flex; align-items: center; gap: 4.2vw; padding-left: 6vw; position: relative; z-index: 1; }
+  .icon { width: min(26vw, 72vh); height: min(26vw, 72vh); filter: drop-shadow(0 1.2vh 3vh rgba(0, 0, 0, 0.7)); }
+  h1 { margin: 0; font-weight: 700; font-size: min(8.2vw, 22vh); letter-spacing: -0.15vw; line-height: 1; color: #efe6da; }
+  h1 span { color: #e8261c; text-shadow: 0 0 2.2vh rgba(255, 42, 26, 0.45); }
+  .tag { margin: 2.2vh 0 0; font-size: min(2.3vw, 6.4vh); color: #d6c9bb; font-weight: 400; }
+  .sub { margin: 1.6vh 0 0; font-size: min(1.35vw, 3.8vh); color: #8f8378; letter-spacing: 0.04vw; }
+  svg.pulse { position: absolute; left: 0; bottom: 7vh; width: 100vw; height: 18vh; z-index: 0; opacity: 0.55; }
+</style>
+</head>
+<body>
+  <svg class="pulse" viewBox="0 0 1600 100" preserveAspectRatio="none">
+    <defs><filter id="g"><feGaussianBlur stdDeviation="3"/></filter></defs>
+    <path d="M0 70 H1080 L1096 58 L1112 70 H1150 L1190 8 L1236 92 L1258 70 H1300 L1318 56 L1336 70 H1600"
+          fill="none" stroke="#ff2a1a" stroke-width="5" filter="url(#g)"/>
+    <path d="M0 70 H1080 L1096 58 L1112 70 H1150 L1190 8 L1236 92 L1258 70 H1300 L1318 56 L1336 70 H1600"
+          fill="none" stroke="#e8261c" stroke-width="2"/>
+  </svg>
+  <div class="wrap">
+    <img class="icon" src="adapsych-icon.svg" alt="">
+    <div>
+      <h1>Ada<span>Psych</span></h1>
+      <p class="tag">The haunted house that reads your fear.</p>
+      <p class="sub">Adaptive horror in Unity 6 &nbsp;·&nbsp; stress-driven textures, monsters &amp; audio &nbsp;·&nbsp; webcam feedback</p>
+    </div>
+  </div>
+</body>
+</html>
