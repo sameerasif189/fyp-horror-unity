@@ -5,7 +5,8 @@ using UnityEngine;
 
 /// <summary>
 /// Indexes iteration-2 horror audio banks and juggles the FULL per-level pool
-/// (shuffle without replacement) on every stress change.
+/// (shuffle without replacement) on every stress change. The level folders are hand-curated: every .wav / .mp3 / .ogg
+/// in them plays at that level.
 /// </summary>
 public static class ProceduralAssetBank
 {
@@ -17,6 +18,24 @@ public static class ProceduralAssetBank
     static int _wildlifeDeckPos;
     static bool _ready;
     static string _root;
+
+    /// <summary>
+    /// Every playable clip in a level folder is used: the user curates fyp iteration 2/assets/audio/{level} by hand (26 Sep
+    /// 2026 - the generated stinger / drone .wavs were deleted, the remaining .mp3s and .wavs chosen per level), so the
+    /// folder is the playlist. No name filters. Empty files (a 0-byte "The Door Creaks" in L1) are skipped.
+    /// </summary>
+    static readonly string[] PlayableExtensions = { ".wav", ".mp3", ".ogg" };
+
+    static bool Playable(string path)
+    {
+        string ext = Path.GetExtension(path).ToLowerInvariant();
+        if (Array.IndexOf(PlayableExtensions, ext) < 0) return false;
+        try { return new FileInfo(path).Length > 0; }
+        catch { return false; }
+    }
+
+    /// <summary>WAVs load synchronously (<see cref="LoadClip"/>); anything else is decoded by the caller with UnityWebRequest.</summary>
+    public static bool IsWav(string path) => string.Equals(Path.GetExtension(path), ".wav", StringComparison.OrdinalIgnoreCase);
 
     public static bool Ready => _ready;
     public static int TotalCount
@@ -61,16 +80,13 @@ public static class ProceduralAssetBank
         for (int level = 0; level < 6; level++)
         {
             string dir = Path.Combine(_root, "audio", level.ToString());
-            AddWavs(dir, LevelClips[level], recursive: false);
+            AddClips(dir, LevelClips[level], recursive: false);
         }
-        AddWavs(Path.Combine(_root, "wildlife"), WildlifeClips, recursive: true);
+        AddClips(Path.Combine(_root, "wildlife"), WildlifeClips, recursive: true);
 
-        string fypAudio = Path.Combine(Application.dataPath, "FYP", "Audio");
-        if (Directory.Exists(fypAudio))
-        {
-            for (int level = 0; level < 6; level++)
-                AddWavs(Path.Combine(fypAudio, level.ToString()), LevelClips[level], recursive: true);
-        }
+        // Assets/FYP/Audio/{level}/amb_0 / amb_1 are NOT pooled any more (26 Sep 2026): they are not part of the user's
+        // curated set and are the harsh "buzz" they wanted gone - with the curated .mp3s unread they were the whole L5
+        // pool and repeated every few seconds. The files stay in the project, unused by this bank.
 
         _ready = true;
         Debug.Log($"[ProcBank] indexed level=[{Count(0)},{Count(1)},{Count(2)},{Count(3)},{Count(4)},{Count(5)}] wildlife={WildlifeClips.Count} root={_root}");
@@ -78,16 +94,14 @@ public static class ProceduralAssetBank
 
     static int Count(int i) => LevelClips[i]?.Count ?? 0;
 
-    static void AddWavs(string dir, List<string> into, bool recursive)
+    static void AddClips(string dir, List<string> into, bool recursive)
     {
         if (!Directory.Exists(dir) || into == null) return;
         var opt = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
         try
         {
-            foreach (var f in Directory.GetFiles(dir, "*.wav", opt))
-                into.Add(f);
-            foreach (var f in Directory.GetFiles(dir, "*.WAV", opt))
-                if (!into.Contains(f)) into.Add(f);
+            foreach (var f in Directory.GetFiles(dir, "*", opt))
+                if (Playable(f) && !into.Contains(f)) into.Add(f);
         }
         catch (Exception e)
         {
@@ -189,6 +203,8 @@ public static class ProceduralAssetBank
     public static AudioClip LoadClip(string path, string name)
     {
         if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+        // WAV only; .mp3 / .ogg are decoded asynchronously by AudioGenerationRunner (the pools now hold all three).
+        if (!IsWav(path)) return null;
         try
         {
             byte[] wav = File.ReadAllBytes(path);

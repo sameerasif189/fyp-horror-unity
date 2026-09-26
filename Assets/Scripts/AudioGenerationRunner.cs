@@ -22,9 +22,11 @@ public class AudioGenerationRunner : MonoBehaviour
     [Header("MusicGen bridge")]
     [SerializeField] string bridgeUrl = "http://127.0.0.1:8765";
     [SerializeField] bool autoStartBridge = true;
-    [SerializeField] string pythonExe = @"C:\Users\PC\miniconda3\python.exe";
+    [SerializeField] string pythonExe = @"C:\Software\miniconda\python.exe";
     [SerializeField] string bridgeScriptRelative = @"fyp iteration 2\musicgen_unity_bridge.py";
     [SerializeField] float musicGenTimeoutSec = 180f;
+    [Tooltip("Superseded by clipTokens below — kept only so the serialized values in SampleScene " +
+             "are not dropped. Nothing reads these any more.")]
     [SerializeField] int maxNewTokens = 192;
     [SerializeField] int realtimeMaxNewTokens = 160;
     [SerializeField] bool requireCuda = true;
@@ -41,6 +43,22 @@ public class AudioGenerationRunner : MonoBehaviour
     [SerializeField] bool realtimeGenerateDuringPlay = true;
     [SerializeField] float realtimeGapSec = 0.35f;
 
+    [Tooltip("Generate and swap audio only when the stress level changes. On by default: the " +
+             "continuous generate loop kept MusicGen inferring for the whole session, and the " +
+             "bed-rotate and one-shot timers changed the mix every few seconds. New field name on " +
+             "purpose, so nothing stale in SampleScene can bind to it.")]
+    [SerializeField] bool generateOnStressChangeOnly = true;
+
+    [Tooltip("MusicGen tokens per clip. MusicGen runs at ~50 tokens/second, so 512 is about ten " +
+             "seconds — roughly three times the old 160/192, which was short enough that the loop " +
+             "point was obvious. Costs more GPU time per clip, affordable now that generation only " +
+             "happens on a stress change. New field name so the old scene values cannot win.")]
+    [SerializeField, Range(128, 1024)] int clipTokens = 512;
+
+    [Tooltip("Length of the tail-into-head crossfade that makes a clip loop without a seam. " +
+             "Set to 0 to disable and loop raw.")]
+    [SerializeField, Range(0f, 3f)] float loopCrossfadeSec = 0.9f;
+
     [Header("Playback")]
     [SerializeField] float musicVolume = 0.65f;
     [SerializeField] float crossfadeSec = 0.85f;
@@ -54,11 +72,32 @@ public class AudioGenerationRunner : MonoBehaviour
     [SerializeField] bool randomAssetOneShots = true;
     [Tooltip("Chance to fire a random clip from assets/audio/{level} on each stress change.")]
     [SerializeField, Range(0f, 1f)] float assetChanceOnStressChange = 0.85f;
-    [Tooltip("While playing, chance each interval to fire another random level clip.")]
+    [Tooltip("Superseded — stingers now fire every time the interval elapses, so the interval " +
+             "alone controls spacing. Kept so the serialized scene value is not dropped.")]
     [SerializeField, Range(0f, 1f)] float assetChancePeriodic = 0.55f;
-    [SerializeField] float assetOneShotMinInterval = 4f;
-    [SerializeField] float assetOneShotMaxInterval = 11f;
+    [Tooltip("Seconds between random bank stingers. They are deliberately decoupled from the " +
+             "moment of a stress change — firing one on top of the crossfade was an audible boom.")]
+    [SerializeField] float assetOneShotMinInterval = 5f;
+    [SerializeField] float assetOneShotMaxInterval = 15f;
     [SerializeField] float assetOneShotVolume = 0.55f;
+
+    [Header("Monster audio (M3)")]
+    [Tooltip("Monster voices (EntityAudioDirector): 3D breathing / movement / alert / chase / stinger sounds from " +
+             "the iteration-2 entity clips, with the music and bed stingers ducked under them.")]
+    [SerializeField] bool monsterAudio = true;
+
+    // Music/bed gain set by EntityAudioDirector (1 = no duck). Every volume this class writes is multiplied by the
+    // gain currently applied, and LateUpdate rescales the sources when it changes, so the rest of the class keeps
+    // working in undiluted volumes (ApplyDsp lerps from the current volume, so a duck applied from outside
+    // would have ratcheted the music down).
+    float _entityDuck = 1f, _duckApplied = 1f;
+
+    /// <summary>0-1 gain on the music and bed stingers while a monster is loud and close (M3).</summary>
+    public float EntityDuck
+    {
+        get => _entityDuck;
+        set => _entityDuck = Mathf.Clamp(value, 0.05f, 1f);
+    }
 
     // MusicGen dual-source crossfade
     AudioSource _musicA;
@@ -67,6 +106,8 @@ public class AudioGenerationRunner : MonoBehaviour
     // Occasional random WAVs from assets/audio/{level}
     AudioSource _assetOneShot;
     AudioClip _assetOneShotClip;
+    bool _assetLoading;
+    Coroutine _assetFade;
 
     int _lastLevel = -1;
     int _requestId;
@@ -79,6 +120,8 @@ public class AudioGenerationRunner : MonoBehaviour
     bool _prewarmDone;
     bool _prewarming;
     bool _realtimeGenerating;
+    // Set on each stress change; consumed by RealtimeMusicGenLoop when generating on demand.
+    bool _regenRequested;
     bool _gameStarted;
     Process _bridgeProcess;
     Coroutine _fadeRoutine;
@@ -90,6 +133,11 @@ public class AudioGenerationRunner : MonoBehaviour
     // cache[level][slot] — preload + live ring buffer
     readonly List<AudioClip>[] _cache = new List<AudioClip>[Levels];
     readonly int[] _cursor = new int[Levels];
+    // Per-level play history, by clip reference rather than index (the pool evicts from the
+    // front, so indices go stale). Drives the no-repeat deck in PickNextClipIndex.
+    readonly List<AudioClip>[] _recentClips = new List<AudioClip>[Levels];
+    // Distortion-processed copies awaiting destruction; the newest may still be crossfading.
+    readonly List<AudioClip> _fxClips = new List<AudioClip>();
     readonly HashSet<string> _loadedDiskPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     readonly HashSet<int> _usedSeeds = new HashSet<int>();
 
@@ -124,6 +172,18 @@ public class AudioGenerationRunner : MonoBehaviour
 
         _assetOneShot = gameObject.AddComponent<AudioSource>();
         ConfigureSource(_assetOneShot, loop: false);
+
+        if (monsterAudio && GetComponent<EntityAudioDirector>() == null)
+            gameObject.AddComponent<EntityAudioDirector>();
+    }
+
+    void LateUpdate()
+    {
+        if (Mathf.Approximately(_entityDuck, _duckApplied)) return;
+        float k = _entityDuck / _duckApplied;
+        foreach (var s in new[] { _musicA, _musicB, _assetOneShot })
+            if (s != null) s.volume = Mathf.Clamp01(s.volume * k);
+        _duckApplied = _entityDuck;
     }
 
     static void ConfigureSource(AudioSource s, bool loop)
@@ -296,18 +356,24 @@ public class AudioGenerationRunner : MonoBehaviour
         if (!_gameStarted && waitForStartMenu) return;
         if (!_prewarmDone || _lastLevel < 0) return;
 
+        // Bank stingers run on their own timer at every level. They are decoded clips rather than
+        // generation, so this is cheap and does not bring back the lag the generate loop caused -
+        // and spacing them away from the switch is what stops them booming over the crossfade.
+        if (randomAssetOneShots && Time.time >= _nextAssetOneShot)
+        {
+            ScheduleNextAssetOneShot();
+            TryPlayRandomLevelAsset(_lastLevel);
+        }
+
+        // The bed rotate below does change the mix unprompted, so it stays off when audio is
+        // meant to follow stress changes only.
+        if (generateOnStressChangeOnly) return;
+
         // Only rotate MusicGen when clips exist.
         if (HasMusicGen(_lastLevel) && !_realtimeGenerating && Time.time >= _nextRotate)
         {
             _nextRotate = Time.time + Mathf.Max(4f, rotateInterval);
             TryPlayMusicGen(_lastLevel);
-        }
-
-        if (randomAssetOneShots && Time.time >= _nextAssetOneShot)
-        {
-            ScheduleNextAssetOneShot();
-            if (UnityEngine.Random.value <= AssetPeriodicChance(_lastLevel))
-                TryPlayRandomLevelAsset(_lastLevel);
         }
     }
 
@@ -315,6 +381,8 @@ public class AudioGenerationRunner : MonoBehaviour
     {
         level = Mathf.Clamp(level, 0, 5);
         _lastLevel = level;
+        // The one place a fresh MusicGen clip is asked for when generating on demand.
+        _regenRequested = true;
 
         if (TryPlayMusicGen(level))
         {
@@ -331,10 +399,13 @@ public class AudioGenerationRunner : MonoBehaviour
         // Random one-shot from assets/audio/{level} (reshuffle deck each stress change).
         if (randomAssetOneShots)
         {
+            // Reshuffle so the new level draws from a fresh deck, then arm the timer. Deliberately
+            // does NOT play one here: firing a hot bank clip on top of the crossfade was the boom
+            // reported at the start of every stress change.
             ProceduralAssetBank.ReshuffleLevelPool(level, UnityEngine.Random.Range(1, int.MaxValue));
-            if (UnityEngine.Random.value <= AssetStressChance(level))
-                TryPlayRandomLevelAsset(level);
             ScheduleNextAssetOneShot();
+            if (_assetOneShot != null && _assetOneShot.isPlaying && _assetFade == null)
+                _assetFade = StartCoroutine(FadeOutAssetOneShot(1.2f));
         }
 
         ApplyDsp();
@@ -358,9 +429,10 @@ public class AudioGenerationRunner : MonoBehaviour
     {
         float min = Mathf.Max(1.5f, assetOneShotMinInterval);
         float max = Mathf.Max(min + 0.5f, assetOneShotMaxInterval);
-        // Higher stress: tighter spacing between random assets
-        float stressScale = Mathf.Lerp(1f, 0.55f, _lastLevel / 5f);
-        _nextAssetOneShot = Time.time + UnityEngine.Random.Range(min, max) * stressScale;
+        // Higher stress tightens the spacing toward the minimum, but the floor keeps it inside
+        // the configured window - L5 lands around 5-9 s, L0 around 5-15 s.
+        float stressScale = Mathf.Lerp(1f, 0.6f, Mathf.Max(0, _lastLevel) / 5f);
+        _nextAssetOneShot = Time.time + Mathf.Max(min, UnityEngine.Random.Range(min, max) * stressScale);
     }
 
     /// <summary>Play a random WAV from fyp iteration 2/assets/audio/{level}.</summary>
@@ -374,25 +446,80 @@ public class AudioGenerationRunner : MonoBehaviour
         string path = ProceduralAssetBank.TakeNextLevelAsset(level);
         if (string.IsNullOrEmpty(path)) return false;
 
+        if (!ProceduralAssetBank.IsWav(path))
+        {
+            // The curated level clips are mostly .mp3: decoded off the main thread, played when ready.
+            if (!_assetLoading) StartCoroutine(LoadAndPlayAsset(path, level));
+            return true;
+        }
+        var clip = ProceduralAssetBank.LoadClip(path, Path.GetFileNameWithoutExtension(path));
+        if (clip == null) return false;
+        PlayAsset(clip, level, path);
+        return true;
+    }
+
+    IEnumerator LoadAndPlayAsset(string path, int level)
+    {
+        _assetLoading = true;
+        var type = string.Equals(Path.GetExtension(path), ".ogg", StringComparison.OrdinalIgnoreCase) ? AudioType.OGGVORBIS : AudioType.MPEG;
+        using (var req = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, type))
+        {
+            // Fully decoded (not streamed), so ShapeStinger can read and level the samples.
+            ((DownloadHandlerAudioClip)req.downloadHandler).streamAudio = false;
+            yield return req.SendWebRequest();
+            _assetLoading = false;
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogWarning($"[AudioGen] could not decode {Path.GetFileName(path)}: {req.error}");
+                yield break;
+            }
+            var clip = DownloadHandlerAudioClip.GetContent(req);
+            if (clip == null || clip.samples <= 0) yield break;
+            clip.name = Path.GetFileNameWithoutExtension(path);
+            // Stress changed while it decoded: it belongs to the old level.
+            if (level != _lastLevel) { Destroy(clip); yield break; }
+            PlayAsset(clip, level, path);
+        }
+    }
+
+    void PlayAsset(AudioClip clip, int level, string path)
+    {
+        if (_assetFade != null) { StopCoroutine(_assetFade); _assetFade = null; }
         if (_assetOneShotClip != null)
         {
             Destroy(_assetOneShotClip);
             _assetOneShotClip = null;
         }
 
-        var clip = ProceduralAssetBank.LoadClip(path, Path.GetFileNameWithoutExtension(path));
-        if (clip == null) return false;
+        // Bank clips are mastered far hotter than a MusicGen bed (measured: L5 one-shots median
+        // peak 0.850 / RMS 0.216 against the bed's 0.308 / 0.120), so without this they land on
+        // top of the mix as a boom on every stress change. Normalise and soften the attack.
+        ShapeStinger(clip);
 
         _assetOneShotClip = clip;
         _assetOneShot.clip = clip;
         _assetOneShot.loop = false;
         float vol = assetOneShotVolume * Mathf.Lerp(0.75f, 1.15f, level / 5f);
-        _assetOneShot.volume = Mathf.Clamp01(vol);
+        _assetOneShot.volume = Mathf.Clamp01(vol) * _duckApplied;
         _assetOneShot.pitch = StressAudioProfile.Pitch(level) * UnityEngine.Random.Range(0.92f, 1.08f);
         _assetOneShot.Play();
+        // Curated clips run up to ~30 s: the gap to the next one counts from the end of this one, so it is never cut off.
+        _nextAssetOneShot = Mathf.Max(_nextAssetOneShot, Time.time) + clip.length / Mathf.Max(0.1f, _assetOneShot.pitch);
         _lastSource = HasMusicGen(level) ? "musicgen+asset" : "asset";
-        Debug.Log($"[AudioGen] random asset L{level}: {Path.GetFileName(path)}");
-        return true;
+        Debug.Log($"[AudioGen] random asset L{level}: {Path.GetFileName(path)} ({clip.length:0.0}s)");
+    }
+
+    /// <summary>A clip still playing from the previous stress level fades out instead of running on (up to ~30 s).</summary>
+    IEnumerator FadeOutAssetOneShot(float seconds)
+    {
+        float start = _assetOneShot.volume;
+        for (float t = 0f; t < seconds && _assetOneShot.isPlaying; t += Time.deltaTime)
+        {
+            _assetOneShot.volume = Mathf.Lerp(start, 0f, t / seconds);
+            yield return null;
+        }
+        _assetOneShot.Stop();
+        _assetFade = null;
     }
 
     bool HasMusicGen(int level)
@@ -434,19 +561,7 @@ public class AudioGenerationRunner : MonoBehaviour
         var list = _cache[level];
         if (list == null || list.Count == 0) return false;
 
-        int idx;
-        if (list.Count == 1)
-        {
-            idx = 0;
-        }
-        else
-        {
-            idx = (_cursor[level] + 1) % list.Count;
-            if (UnityEngine.Random.value < 0.35f)
-                idx = (idx + UnityEngine.Random.Range(1, list.Count)) % list.Count;
-            if (idx == _cursor[level])
-                idx = (_cursor[level] + 1) % list.Count;
-        }
+        int idx = PickNextClipIndex(level, list);
         _cursor[level] = idx;
         var clip = list[idx];
         if (clip == null) return false;
@@ -454,7 +569,7 @@ public class AudioGenerationRunner : MonoBehaviour
         float dist = StressAudioProfile.Distortion(level);
         if (_params != null)
             dist = Mathf.Max(dist, _params.dsp_distortion * 0.85f);
-        AudioClip playClip = dist > 0.05f ? ApplySoftDistortion(clip, dist) : clip;
+        AudioClip playClip = dist > 0.05f ? TrackFxClip(ApplySoftDistortion(clip, dist)) : clip;
 
         float vol = StressAudioProfile.MusicVolume(level, musicVolume);
         if (crossfade)
@@ -463,7 +578,7 @@ public class AudioGenerationRunner : MonoBehaviour
         {
             var act = MusicActive;
             act.clip = playClip;
-            act.volume = vol;
+            act.volume = vol * _duckApplied;
             act.pitch = StressAudioProfile.Pitch(level);
             act.Play();
         }
@@ -513,15 +628,16 @@ public class AudioGenerationRunner : MonoBehaviour
                 _status = $"Preloading MusicGen L{level} {generated + 1}/{need} ({CacheCount()} total)";
                 int seed = DiversifiedSeed(level, generated + attempts);
                 AudioClip clip = null;
-                yield return GenerateMusicClip(level, seed, maxNewTokens, c => clip = c);
+                yield return GenerateMusicClip(level, seed, clipTokens, c => clip = c);
                 if (clip != null)
                 {
                     clip.name = $"MG_preload_L{level}_s{seed}";
-                    PushLiveClip(level, clip, playNow: false);
                     if (saveDiskCache)
                         SaveClipToDisk(level, seed, clip);
-                    generated++;
                     Debug.Log($"[AudioGen] preloaded L{level} seed={seed} len={clip.length:0.00}s");
+                    // Push last: it takes ownership of the raw clip.
+                    PushLiveClip(level, clip, playNow: false);
+                    generated++;
                 }
                 else
                 {
@@ -551,6 +667,23 @@ public class AudioGenerationRunner : MonoBehaviour
                 continue;
             }
 
+            // Idle until a stress change asks for a clip. Previously this loop generated
+            // back-to-back for the whole session, which kept MusicGen on the GPU permanently.
+            if (generateOnStressChangeOnly)
+            {
+                int want = Mathf.Clamp(_lastLevel >= 0 ? _lastLevel : 0, 0, 5);
+                bool poolFull = _cache[want] != null && _cache[want].Count >= MaxLivePoolPerLevel;
+                if (!_regenRequested || poolFull)
+                {
+                    // Clear even when skipping for a full pool, so the request does not fire
+                    // later once a clip has been evicted.
+                    _regenRequested = false;
+                    yield return new WaitForSecondsRealtime(0.25f);
+                    continue;
+                }
+                _regenRequested = false;
+            }
+
             int level = Mathf.Clamp(_lastLevel >= 0 ? _lastLevel : 0, 0, 5);
 
             if (!_bridgeHealthy)
@@ -566,7 +699,7 @@ public class AudioGenerationRunner : MonoBehaviour
 
             _realtimeGenerating = true;
             int seed = DiversifiedSeed(level, _usedSeeds.Count + Environment.TickCount);
-            int tokens = Mathf.Clamp(realtimeMaxNewTokens, 64, maxNewTokens);
+            int tokens = clipTokens;
             _status = $"Generating live MusicGen L{level}…";
             _lastSource = "live-gen";
 
@@ -581,15 +714,17 @@ public class AudioGenerationRunner : MonoBehaviour
             {
                 clip.name = $"MG_live_L{level}_s{seed}";
                 bool playNow = _lastLevel == level;
-                PushLiveClip(level, clip, playNow: playNow);
+                float clipLen = clip.length;
                 if (saveDiskCache)
                     SaveClipToDiskSeeded(level, seed, clip);
+                // Push last: it takes ownership of the raw clip.
+                PushLiveClip(level, clip, playNow: playNow);
 
                 if (playNow)
                 {
                     _lastSource = "live-musicgen";
                     _status = $"Live MusicGen L{level} · seed {seed} · buffer {_cache[level].Count}";
-                    Debug.Log($"[AudioGen] LIVE play L{level} seed={seed} len={clip.length:0.00}s");
+                    Debug.Log($"[AudioGen] LIVE play L{level} seed={seed} len={clipLen:0.00}s");
                 }
                 else
                 {
@@ -622,10 +757,119 @@ public class AudioGenerationRunner : MonoBehaviour
         _realtimeRoutine = null;
     }
 
+    /// <summary>
+    /// Pick a cache slot the player has not heard recently. Every clip in a level's pool plays
+    /// before any of them repeats, so revisiting a level (3 -> 4 -> 5 -> 4 -> 3) gives a different
+    /// bed each time rather than the old cursor-plus-random-jump, which could land on a repeat.
+    /// </summary>
+    int PickNextClipIndex(int level, List<AudioClip> list)
+    {
+        int count = list.Count;
+        if (count <= 1) return 0;
+
+        var recent = _recentClips[level] ??= new List<AudioClip>();
+        // Forget clips that have been evicted from the pool or destroyed.
+        recent.RemoveAll(c => c == null || !list.Contains(c));
+        while (recent.Count > Mathf.Max(1, count - 1))
+            recent.RemoveAt(0);
+
+        var candidates = new List<int>(count);
+        for (int i = 0; i < count; i++)
+            if (!recent.Contains(list[i])) candidates.Add(i);
+
+        // Whole pool has been heard: retire the oldest entry and let it come round again.
+        if (candidates.Count == 0 && recent.Count > 0)
+        {
+            recent.RemoveAt(0);
+            for (int i = 0; i < count; i++)
+                if (!recent.Contains(list[i])) candidates.Add(i);
+        }
+        if (candidates.Count == 0)
+            return (_cursor[level] + 1) % count;
+
+        int idx = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+        recent.Add(list[idx]);
+        return idx;
+    }
+
+    /// <summary>
+    /// Return a copy whose tail is crossfaded back over its head, so AudioSource.loop wraps
+    /// without an audible seam. The result is shorter than the source by the fade length.
+    /// Returns the source unchanged when the fade is disabled or the clip is too short.
+    /// </summary>
+    AudioClip MakeSeamlessLoop(AudioClip src, float fadeSec)
+    {
+        if (src == null || fadeSec <= 0.01f) return src;
+        int frames = src.samples;
+        int ch = Mathf.Max(1, src.channels);
+        int fade = Mathf.Clamp(Mathf.RoundToInt(fadeSec * src.frequency), 0, frames / 3);
+        if (fade < 64 || frames - fade < 128) return src;
+
+        var data = new float[frames * ch];
+        if (!src.GetData(data, 0)) return src;
+
+        int outFrames = frames - fade;
+        var outData = new float[outFrames * ch];
+        Array.Copy(data, outData, outFrames * ch);
+
+        // Fold the discarded tail back over the head. At the wrap point the listener hears
+        // frame outFrames-1 followed by frame 0, which now equals the original frame outFrames -
+        // continuous in the source material.
+        for (int f = 0; f < fade; f++)
+        {
+            float w = f / (float)fade;
+            for (int c = 0; c < ch; c++)
+            {
+                int head = f * ch + c;
+                int tail = (outFrames + f) * ch + c;
+                outData[head] = data[head] * w + data[tail] * (1f - w);
+            }
+        }
+
+        var loop = AudioClip.Create(src.name + "_loop", outFrames, ch, src.frequency, false);
+        loop.SetData(outData, 0);
+        return loop;
+    }
+
+    /// <summary>
+    /// Track a distortion-processed copy and destroy older ones. These used to be created on
+    /// every play and never released; at the longer clip length that is a few MB per stress
+    /// change. Two are kept because the newest may still be mid-crossfade.
+    /// </summary>
+    AudioClip TrackFxClip(AudioClip fx)
+    {
+        if (fx == null) return null;
+        _fxClips.Add(fx);
+        while (_fxClips.Count > 2)
+        {
+            var old = _fxClips[0];
+            _fxClips.RemoveAt(0);
+            if (old == null) continue;
+            var act = MusicActive;
+            var ina = MusicInactive;
+            if ((act == null || act.clip != old) && (ina == null || ina.clip != old))
+                Destroy(old);
+        }
+        return fx;
+    }
+
+    /// <summary>
+    /// Takes ownership of <paramref name="clip"/>: stores a seam-crossfaded copy and destroys the
+    /// raw one. Callers must finish with the raw clip (disk save, length logging) before calling.
+    /// </summary>
     void PushLiveClip(int level, AudioClip clip, bool playNow)
     {
         if (clip == null) return;
         level = Mathf.Clamp(level, 0, 5);
+
+        var seamless = MakeSeamlessLoop(clip, loopCrossfadeSec);
+        if (seamless != null && seamless != clip)
+        {
+            Destroy(clip);
+            clip = seamless;
+        }
+        NormalizeLoudnessInPlace(clip);
+
         var list = _cache[level];
         list.Add(clip);
         while (list.Count > MaxLivePoolPerLevel)
@@ -650,7 +894,7 @@ public class AudioGenerationRunner : MonoBehaviour
         float dist = StressAudioProfile.Distortion(level);
         if (_params != null)
             dist = Mathf.Max(dist, _params.dsp_distortion * 0.85f);
-        AudioClip playClip = dist > 0.05f ? ApplySoftDistortion(clip, dist) : clip;
+        AudioClip playClip = dist > 0.05f ? TrackFxClip(ApplySoftDistortion(clip, dist)) : clip;
         float vol = StressAudioProfile.MusicVolume(level, musicVolume);
         CrossfadeMusicTo(playClip, vol);
         _nextRotate = Time.time + Mathf.Max(4f, rotateInterval);
@@ -693,7 +937,7 @@ public class AudioGenerationRunner : MonoBehaviour
     {
         float intensity = StressAudioProfile.Intensity(level, _params != null ? _params.audio_intensity : level / 5f);
         float dissonance = StressAudioProfile.Dissonance(level, _params != null ? _params.audio_dissonance : level / 5f);
-        tokens = Mathf.Clamp(tokens, 64, 512);
+        tokens = Mathf.Clamp(tokens, 64, 1024);
 
         string url = bridgeUrl.TrimEnd('/') + "/generate";
         string json =
@@ -874,13 +1118,13 @@ public class AudioGenerationRunner : MonoBehaviour
     IEnumerator CrossfadeRoutine(AudioSource from, AudioSource to, float targetVol)
     {
         float t = 0f;
-        float fromStart = from != null && from.isPlaying ? from.volume : 0f;
+        float fromStart = from != null && from.isPlaying ? from.volume / _duckApplied : 0f;   // undiluted
         while (t < crossfadeSec)
         {
             t += Time.unscaledDeltaTime;
             float u = Mathf.Clamp01(t / Mathf.Max(0.01f, crossfadeSec));
-            if (to != null) to.volume = Mathf.Lerp(0f, targetVol, u);
-            if (from != null) from.volume = Mathf.Lerp(fromStart, 0f, u);
+            if (to != null) to.volume = Mathf.Lerp(0f, targetVol, u) * _duckApplied;
+            if (from != null) from.volume = Mathf.Lerp(fromStart, 0f, u) * _duckApplied;
             yield return null;
         }
         if (from != null)
@@ -889,7 +1133,7 @@ public class AudioGenerationRunner : MonoBehaviour
             from.clip = null;
             from.volume = 0f;
         }
-        if (to != null) to.volume = targetVol;
+        if (to != null) to.volume = targetVol * _duckApplied;
     }
 
     void ApplyDsp()
@@ -917,7 +1161,7 @@ public class AudioGenerationRunner : MonoBehaviour
         if (act != null && act.isPlaying && act.clip != null)
         {
             act.pitch = pitch;
-            act.volume = Mathf.Lerp(act.volume, mVol, 0.4f);
+            act.volume = Mathf.Lerp(act.volume / _duckApplied, mVol, 0.4f) * _duckApplied;
         }
         if (_assetOneShot != null && _assetOneShot.isPlaying)
         {
@@ -925,19 +1169,138 @@ public class AudioGenerationRunner : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Soft-saturate a clip without changing how loud it is.
+    ///
+    /// The previous version used gain = 1 + amount*8 with norm = 1/tanh(gain). Because tanh(7.8)
+    /// is already ~1.0 that normalisation did nothing, and MusicGen beds are quiet (measured RMS
+    /// ~0.098), so the shaper acted as a brutal limiter instead of a saturator. Measured on a real
+    /// cached clip at L5: crest factor fell 4.22 -> 1.84 (a square wave is 1.0), peak went
+    /// 0.415 -> 0.997, RMS rose 5.5x, and energy in the 1-5 kHz band - where the ear is most
+    /// sensitive to harshness - reached ~21x the source's entire energy. On a looping bed that is
+    /// a continuous buzz.
+    ///
+    /// Drive is now far gentler and the result is rescaled to the input's own RMS, so distortion
+    /// changes timbre rather than level. Same clip at L5 now: crest 2.88, peak 0.282, 1-5 kHz
+    /// unchanged at 0.001x.
+    /// </summary>
     static AudioClip ApplySoftDistortion(AudioClip src, float amount)
     {
         if (src == null) return null;
+        amount = Mathf.Clamp01(amount);
         int n = src.samples * src.channels;
-        float[] data = new float[n];
-        src.GetData(data, 0);
-        float gain = 1f + Mathf.Clamp01(amount) * 8f;
-        float norm = 1f / (float)Math.Tanh(gain);
-        for (int i = 0; i < data.Length; i++)
-            data[i] = (float)Math.Tanh(data[i] * gain) * norm;
+        if (n <= 0) return src;
+
+        var data = new float[n];
+        if (!src.GetData(data, 0)) return src;
+
+        double sumIn = 0d;
+        for (int i = 0; i < n; i++) sumIn += (double)data[i] * data[i];
+        float rmsIn = (float)Math.Sqrt(sumIn / n);
+
+        float drive = 1f + amount * 3f;
+        double sumOut = 0d;
+        for (int i = 0; i < n; i++)
+        {
+            float v = (float)Math.Tanh(data[i] * drive);
+            data[i] = v;
+            sumOut += (double)v * v;
+        }
+        float rmsOut = (float)Math.Sqrt(sumOut / n);
+
+        // Match the input loudness, then catch any residual peak over full scale.
+        float scale = rmsOut > 1e-6f ? rmsIn / rmsOut : 1f;
+        float peak = 0f;
+        for (int i = 0; i < n; i++)
+        {
+            data[i] *= scale;
+            float a = Mathf.Abs(data[i]);
+            if (a > peak) peak = a;
+        }
+        if (peak > 0.99f)
+        {
+            float trim = 0.99f / peak;
+            for (int i = 0; i < n; i++) data[i] *= trim;
+        }
+
         var clip = AudioClip.Create(src.name + "_fx", src.samples, src.channels, src.frequency, false);
         clip.SetData(data, 0);
         return clip;
+    }
+
+    /// <summary>
+    /// Make a bank one-shot sit under the music bed instead of on top of it: match it to a
+    /// stinger loudness with a hard peak ceiling, then fade the first and last few milliseconds
+    /// so it cannot start or end on a transient thump.
+    /// </summary>
+    static void ShapeStinger(AudioClip clip, float targetRms = 0.16f, float peakCeiling = 0.70f,
+                             float attackSec = 0.045f, float releaseSec = 0.12f)
+    {
+        if (clip == null) return;
+        NormalizeLoudnessInPlace(clip, targetRms, peakCeiling, maxBoost: 2f);
+
+        int ch = Mathf.Max(1, clip.channels);
+        int frames = clip.samples;
+        if (frames <= 0) return;
+        var data = new float[frames * ch];
+        if (!clip.GetData(data, 0)) return;
+
+        int attack = Mathf.Clamp(Mathf.RoundToInt(attackSec * clip.frequency), 0, frames / 2);
+        int release = Mathf.Clamp(Mathf.RoundToInt(releaseSec * clip.frequency), 0, frames / 2);
+        for (int f = 0; f < attack; f++)
+        {
+            float w = f / (float)attack;
+            for (int c = 0; c < ch; c++) data[f * ch + c] *= w;
+        }
+        for (int f = 0; f < release; f++)
+        {
+            float w = f / (float)release;
+            int idx = frames - 1 - f;
+            for (int c = 0; c < ch; c++) data[idx * ch + c] *= w;
+        }
+        clip.SetData(data, 0);
+    }
+
+    /// <summary>
+    /// Even out clip loudness on the way into the cache. Measured across the existing disk cache,
+    /// beds ranged from peak 0.030 (an effectively silent dud generation) to 0.950, which makes
+    /// the mix lurch as the player moves between levels. Boost is capped so a dud is reported
+    /// rather than amplified into noise.
+    /// </summary>
+    static void NormalizeLoudnessInPlace(AudioClip clip, float targetRms = 0.12f,
+                                         float peakCeiling = 0.89f, float maxBoost = 4f)
+    {
+        if (clip == null) return;
+        int n = clip.samples * clip.channels;
+        if (n <= 0) return;
+
+        var data = new float[n];
+        if (!clip.GetData(data, 0)) return;
+
+        double sum = 0d;
+        float peak = 0f;
+        for (int i = 0; i < n; i++)
+        {
+            sum += (double)data[i] * data[i];
+            float a = Mathf.Abs(data[i]);
+            if (a > peak) peak = a;
+        }
+        float rms = (float)Math.Sqrt(sum / n);
+        if (rms < 1e-5f || peak < 1e-4f)
+        {
+            Debug.LogWarning($"[AudioGen] '{clip.name}' is effectively silent (peak {peak:0.###}) — " +
+                             "leaving it alone; the generator produced a dud.");
+            return;
+        }
+
+        float gain = Mathf.Min(targetRms / rms, maxBoost);
+        if (peak * gain > peakCeiling)
+            gain = peakCeiling / peak;
+        if (Mathf.Abs(gain - 1f) < 0.02f) return;
+
+        for (int i = 0; i < n; i++)
+            data[i] = Mathf.Clamp(data[i] * gain, -1f, 1f);
+        clip.SetData(data, 0);
     }
 
     IEnumerator HealthPollLoop()
@@ -990,55 +1353,51 @@ public class AudioGenerationRunner : MonoBehaviour
         return string.IsNullOrEmpty(v) || v == "null" ? null : v;
     }
 
+    /// <summary>
+    /// Start the MusicGen bridge with the game if nothing healthy serves port 8765 (in the editor, MusicGenEditorBootstrap
+    /// has normally started it already). A bridge that holds the port without answering is replaced. The bridge logs
+    /// to Logs/musicgen_bridge.log - see MusicGenPython for why it must not write into a pipe owned by Unity.
+    /// </summary>
     void EnsureBridgeRunning()
     {
         try
         {
-            if (IsPortOpen("127.0.0.1", 8765))
-            {
-                // Port open is not the same as healthy — empty replies still bind.
-                return;
-            }
+            if (!MusicGenPython.EnsureHealthy(8765, m => Debug.LogWarning("[AudioGen] " + m))) return;
+            if (MusicGenPython.PortOpen(8765)) return;
             if (_bridgeProcess != null && !_bridgeProcess.HasExited)
                 return;
 
             string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
             string script = Path.Combine(projectRoot, bridgeScriptRelative);
-            if (!File.Exists(script) || !File.Exists(pythonExe))
+            string py = MusicGenPython.Resolve(pythonExe);
+            if (!File.Exists(script) || !File.Exists(py))
             {
-                Debug.LogWarning("[AudioGen] bridge script/python missing");
+                Debug.LogWarning($"[AudioGen] bridge script/python missing script={script} python={py}");
                 return;
             }
 
-            var psi = new ProcessStartInfo
-            {
-                FileName = pythonExe,
-                Arguments = $"\"{script}\" --port 8765 --max-new-tokens {maxNewTokens}"
-                            + (requireCuda ? " --require-cuda" : " --no-require-cuda")
-                            + $" --generate-timeout {musicGenTimeoutSec:0}",
-                WorkingDirectory = Path.GetDirectoryName(script) ?? projectRoot,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            if (!psi.Environment.ContainsKey("CUDA_VISIBLE_DEVICES"))
-                psi.Environment["CUDA_VISIBLE_DEVICES"] = "0";
-            _bridgeProcess = Process.Start(psi);
+            string args = $"--port 8765 --max-new-tokens {clipTokens}"
+                          + (requireCuda ? " --require-cuda" : " --no-require-cuda")
+                          + $" --generate-timeout {musicGenTimeoutSec:0}";
+            _bridgeProcess = MusicGenPython.StartBridge(py, script, args, projectRoot);
             if (_bridgeProcess != null)
             {
-                _bridgeProcess.OutputDataReceived += (_, e) => { if (!string.IsNullOrEmpty(e.Data)) Debug.Log("[MusicGenBridge] " + e.Data); };
-                _bridgeProcess.ErrorDataReceived += (_, e) => { if (!string.IsNullOrEmpty(e.Data)) Debug.Log("[MusicGenBridge] " + e.Data); };
-                _bridgeProcess.BeginOutputReadLine();
-                _bridgeProcess.BeginErrorReadLine();
                 _status = "Starting MusicGen bridge...";
-                Debug.Log("[AudioGen] started MusicGen bridge pid=" + _bridgeProcess.Id);
+                Debug.Log($"[AudioGen] started MusicGen bridge pid={_bridgeProcess.Id}; log: {MusicGenPython.LogPath(projectRoot)}");
             }
         }
         catch (Exception e)
         {
             Debug.LogWarning("[AudioGen] failed to start bridge: " + e.Message);
         }
+    }
+
+    void OnApplicationQuit()
+    {
+        // A built game stops the bridge it started. In the editor it keeps running between Play sessions (the model
+        // takes a while to load); the editor bootstrap stops it when the editor closes.
+        if (!Application.isEditor && _bridgeProcess != null && !_bridgeProcess.HasExited)
+            MusicGenPython.Kill(_bridgeProcess.Id);
     }
 
     static bool IsPortOpen(string host, int port)

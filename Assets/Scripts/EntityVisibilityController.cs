@@ -1,7 +1,8 @@
 using UnityEngine;
 
 /// <summary>
-/// Keeps any leftover entity objects hidden. The haunted house has no creatures.
+/// Legacy hide-all helper. MonsterDirector owns reveal/chase now; this stays
+/// disabled on HorrorSystems so leftover HorrorRoom entities remain hidden.
 /// </summary>
 public class EntityVisibilityController : MonoBehaviour
 {

@@ -49,7 +49,8 @@ MusicGen weights are local-only (~2–3 GB). From `fyp iteration 2`:
 hf download facebook/musicgen-small --local-dir "models/musicgen-small"
 ```
 
-Start the CUDA bridge (or let Play Mode auto-start it if Python path matches):
+The editor starts the CUDA bridge by itself when it loads and before Play, replacing one stuck on the port (log:
+`Logs/musicgen_bridge.log`; ready about 60 s after start). To run it by hand instead:
 
 ```powershell
 cd "fyp iteration 2"

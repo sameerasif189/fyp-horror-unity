@@ -48,6 +48,9 @@ public class FusionDirector : MonoBehaviour
         public float visual_flicker_rate => Get("visual_flicker_rate");
         public float entity_opacity => Get("entity_opacity");
         public float entity_probability => Get("entity_probability");
+        public float entity_aggression => Get("entity_aggression");
+        public float entity_morphology => Get("entity_morphology");
+        public float entity_aura => Get("entity_aura");
     }
 
     [SerializeField] ModelAsset fusionModelAsset;
@@ -214,6 +217,9 @@ public class FusionDirector : MonoBehaviour
         p.values[15] = t;
         p.values[25] = level >= 4 ? 0.8f : 0.1f;
         p.values[26] = level >= 4 ? Mathf.Lerp(0.4f, 1f, (level - 4) / 1f) : 0f;
+        p.values[27] = level >= 4 ? Mathf.Lerp(0.45f, 1f, (level - 4) / 1f) : 0f; // entity_aggression
+        p.values[28] = level >= 4 ? 0.35f : 0f;
+        p.values[29] = level >= 4 ? 0.4f : 0f;
     }
 
     void ApplyEnvironment(FusionParams p)

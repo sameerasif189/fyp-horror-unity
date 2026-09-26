@@ -108,7 +108,11 @@ public class PlayerController : MonoBehaviour
             _velocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
 
         _velocity.y += gravity * Time.deltaTime;
-        _controller.Move(_velocity * Time.deltaTime);
+        var hit = _controller.Move(_velocity * Time.deltaTime);
+        // Head hit the ceiling: stop rising. The 1.2 m jump reaches past the 3.0 m ground-floor and basement
+        // ceilings (2 m capsule), and without this the leftover upward speed pinned the player there for ~0.2-0.5 s.
+        if ((hit & CollisionFlags.Above) != 0 && _velocity.y > 0f)
+            _velocity.y = 0f;
     }
 
     void SetCursorLocked(bool locked)

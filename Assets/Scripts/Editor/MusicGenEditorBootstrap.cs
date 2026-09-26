@@ -20,7 +20,7 @@ public static class MusicGenEditorBootstrap
     const int MinClipsPerLevel = 3;
     const int LibraryTarget = 9;
     const string BridgeUrl = "http://127.0.0.1:8765";
-    const string PythonExe = @"C:\Users\PC\miniconda3\python.exe";
+    const string PythonExe = @"C:\Software\miniconda\python.exe";
 
     static bool _prewarming;
     static bool _enterPlayWhenDone;
@@ -33,6 +33,8 @@ public static class MusicGenEditorBootstrap
     static MusicGenEditorBootstrap()
     {
         EditorApplication.playModeStateChanged += OnPlayModeChanged;
+        EditorApplication.quitting -= StopOurBridge;
+        EditorApplication.quitting += StopOurBridge;
         EditorApplication.delayCall += () =>
         {
             EnsureBridgeRunning();
@@ -179,36 +181,51 @@ public static class MusicGenEditorBootstrap
         return n;
     }
 
+    const string PidKey = "FYP.MusicGenBridgePid";
+
+    /// <summary>
+    /// Start the bridge if nothing healthy is serving port 8765, replacing a stuck one (see MusicGenPython for why the
+    /// old launcher left zombies behind and the bridge had to be run from a terminal). Its output goes to
+    /// Logs/musicgen_bridge.log. The pid survives domain reloads in SessionState, so the editor can stop the bridge it
+    /// started when it quits.
+    /// </summary>
     static void EnsureBridgeRunning()
     {
-        if (PortOpen("127.0.0.1", 8765)) return;
-        if (_bridge != null && !_bridge.HasExited) return;
-        if (!File.Exists(PythonExe) || !File.Exists(BridgeScript))
+        if (!MusicGenPython.EnsureHealthy(8765, m => Debug.LogWarning("[MusicGenEditor] " + m))) return;
+        if (MusicGenPython.PortOpen(8765)) return;   // a healthy bridge (ours, or one started by hand)
+        if (_bridge != null && !_bridge.HasExited) return;   // ours, still loading the model
+        int oldPid = SessionState.GetInt(PidKey, -1);
+        if (oldPid > 0 && IsAlive(oldPid)) return;   // ours from before a domain reload, still loading
+        string py = MusicGenPython.Resolve(PythonExe);
+        if (!File.Exists(py) || !File.Exists(BridgeScript))
         {
-            Debug.LogWarning("[MusicGenEditor] python or bridge script missing");
+            Debug.LogWarning($"[MusicGenEditor] python or bridge script missing python={py} script={BridgeScript}");
             return;
         }
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = PythonExe,
-                Arguments = $"\"{BridgeScript}\" --port 8765 --max-new-tokens 192 --require-cuda --generate-timeout 180",
-                WorkingDirectory = Path.GetDirectoryName(BridgeScript),
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            if (!psi.Environment.ContainsKey("CUDA_VISIBLE_DEVICES"))
-                psi.Environment["CUDA_VISIBLE_DEVICES"] = "0";
-            _bridge = Process.Start(psi);
-            Debug.Log("[MusicGenEditor] started bridge pid=" + (_bridge?.Id));
+            _bridge = MusicGenPython.StartBridge(py, BridgeScript, "--port 8765 --max-new-tokens 192 --require-cuda --generate-timeout 180", ProjectRoot);
+            if (_bridge != null) SessionState.SetInt(PidKey, _bridge.Id);
+            Debug.Log($"[MusicGenEditor] started bridge (pid {_bridge?.Id}); log: {MusicGenPython.LogPath(ProjectRoot)}");
         }
         catch (Exception e)
         {
             Debug.LogWarning("[MusicGenEditor] failed to start bridge: " + e.Message);
         }
+    }
+
+    static bool IsAlive(int pid)
+    {
+        try { return !Process.GetProcessById(pid).HasExited; }
+        catch { return false; }
+    }
+
+    /// <summary>The editor is closing: stop the bridge it started (it holds ~2 GB of VRAM). A hand-started one is left alone.</summary>
+    static void StopOurBridge()
+    {
+        int pid = SessionState.GetInt(PidKey, -1);
+        if (pid > 0 && IsAlive(pid)) MusicGenPython.Kill(pid);
+        SessionState.EraseInt(PidKey);
     }
 
     static bool WaitForBridge(float timeoutSec, bool showProgress)
