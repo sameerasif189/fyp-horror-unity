@@ -9,7 +9,7 @@ Unity (URP) horror room demo driven by **stress level 0–5**. It uses iteration
 | `Assets/Scripts/` | Stress, fusion, texture corruption, MusicGen audio runner, entities, FPS player |
 | `Assets/FYP/` | Clean PBR textures, entity GLBs, Sentis ONNX models, ambient WAVs |
 | `Packages/` / `ProjectSettings/` | URP + Input System + AI Inference (Sentis) + glTFast |
-| `fyp iteration 2/` | Python MusicGen bridge + generators (clone — see below) |
+| `fyp iteration 2/` | Separate repo (clone — see below): MusicGen bridge + generators, and the curated audio the game plays (`assets/audio/0-5` per stress level, `assets/entity_audio` for the monsters) |
 
 Large training dumps (`models/`, MusicGen weights, grain banks) are **not** committed. Download steps are below.
 
@@ -27,14 +27,14 @@ Large training dumps (`models/`, MusicGen weights, grain banks) are **not** comm
    git clone https://github.com/sameerasif189/fyp-horror-unity.git
    cd fyp-horror-unity
    ```
-2. Clone the generator backend into the expected folder name (space included):
-   ```powershell
-   git clone https://github.com/sameerasif189/fyp-iteration-2.git "fyp iteration 2"
-   ```
-   Or run:
+2. Run the setup script. It clones (or updates) fyp-iteration-2 into `fyp iteration 2`, which brings the curated
+   audio, and downloads the MusicGen weights (~2.3 GB; add `-SkipMusicGenWeights` to skip them). Re-run it whenever
+   the audio changes.
    ```powershell
    .\setup_deps.ps1
    ```
+   An older `fyp iteration 2` clone keeps untracked copies of the audio, including clips that were curated out. The
+   script moves those to `assets\_local_backup_<date>` on its first run, so only the curated set plays.
 3. Open the folder in **Unity Hub → Open →** select this project root.
 4. Let Unity import packages / assets (first open can take several minutes).
 5. Open scene: `Assets/Scenes/SampleScene.unity` (or your active SampleScene).
@@ -42,10 +42,10 @@ Large training dumps (`models/`, MusicGen weights, grain banks) are **not** comm
 
 ### Optional: MusicGen (GPU ambience)
 
-MusicGen weights are local-only (~2–3 GB). From `fyp iteration 2`:
+MusicGen weights are not in either repo (~2.3 GB). `setup_deps.ps1` downloads them into
+`fyp iteration 2\models\musicgen-small`; by hand, from `fyp iteration 2`:
 
 ```powershell
-# Example with Hugging Face CLI (once):
 hf download facebook/musicgen-small --local-dir "models/musicgen-small"
 ```
 
@@ -59,7 +59,7 @@ python musicgen_unity_bridge.py --port 8765 --require-cuda
 
 Health check: [http://127.0.0.1:8765/health](http://127.0.0.1:8765/health) — expect `"device":"cuda"`.
 
-Without the bridge, the Unity audio runner still plays **procedural** horror beds.
+Without the bridge, the game still plays the curated per-level clips.
 
 ### Python deps (iteration 2)
 
